@@ -34,6 +34,14 @@ declare global {
 const DEMO_TRANSCRIPT = "I want order a flat white, please.";
 const CORRECTED_SENTENCE = "I’d like to order a flat white, please.";
 
+const VOICE_SOURCE_LABEL = {
+  api: "elevenlabs",
+  file: "coach-response.mp3",
+  speech: "speechSynthesis",
+  timer: "timer",
+  cancelled: "cancelled",
+} as const;
+
 // مؤقتًا نستخدم أصوات المتصفح المجانية. عند اعتماد Fish Audio أو ElevenLabs
 // سنستبدل هذه الكتلة بموصل خادمي واحد دون تغيير الواجهة.
 const VOICE_PROFILE = {
@@ -277,6 +285,10 @@ export default function Home() {
             controller.signal.addEventListener("abort", handleAbort, { once: true });
           }),
       });
+
+      if (process.env.NODE_ENV === "development" && source !== "cancelled") {
+        console.info(`[voice] source: ${VOICE_SOURCE_LABEL[source]}`);
+      }
 
       if (source !== "cancelled" && coachRequest.current === controller) setScene("review");
     } finally {

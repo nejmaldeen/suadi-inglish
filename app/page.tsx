@@ -1,38 +1,37 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  SPEECH_STATUS_LABELS,
+  type SpeechInputErrorCode,
+  type SpeechInputState,
+} from "@/lib/speech/contracts";
+import {
+  createPushToTalkController,
+  type PushToTalkController,
+} from "@/lib/speech/recorder";
 import { runPlaybackFallback } from "@/lib/voice/playback";
 
 type SceneState = "ready" | "listening" | "thinking" | "speaking" | "review";
-type ExperienceMode = "showcase" | "live";
-
-type SpeechRecognitionEventLike = Event & {
-  results: ArrayLike<{
-    0: { transcript: string };
-    isFinal: boolean;
-  }>;
-};
-
-type SpeechRecognitionLike = {
-  continuous: boolean;
-  interimResults: boolean;
-  lang: string;
-  onresult: ((event: SpeechRecognitionEventLike) => void) | null;
-  onerror: (() => void) | null;
-  onend: (() => void) | null;
-  start: () => void;
-  stop: () => void;
-};
-
-declare global {
-  interface Window {
-    SpeechRecognition?: new () => SpeechRecognitionLike;
-    webkitSpeechRecognition?: new () => SpeechRecognitionLike;
-  }
-}
-
-const DEMO_TRANSCRIPT = "I want order a flat white, please.";
 const CORRECTED_SENTENCE = "I’d like to order a flat white, please.";
+const INITIAL_SPEECH_INPUT: SpeechInputState = { status: "ready", transcript: "" };
+
+const SPEECH_ERROR_MESSAGES: Record<SpeechInputErrorCode, string> = {
+  unsupported: "التسجيل الصوتي غير مدعوم في هذا المتصفح.",
+  microphone_permission: "لم يُسمح باستخدام الميكروفون. فعّل الإذن ثم حاول مرة ثانية.",
+  microphone_unavailable: "تعذّر تشغيل الميكروفون. تأكد أنه غير مستخدم في تطبيق آخر.",
+  no_audio: "ما سمعنا كلامًا واضحًا. حاول مرة ثانية وتكلّم قبل إيقاف التسجيل.",
+  invalid_audio: "صيغة التسجيل غير مدعومة. جرّب مرة ثانية من هذا المتصفح.",
+  audio_too_large: "التسجيل طويل جدًا. جرّب جملة أقصر.",
+  provider_failed: "تعذّر تحويل الصوت إلى نص الآن. حاول مرة ثانية.",
+  network_failed: "تعذّر الاتصال بخدمة تحويل الصوت. تحقق من الشبكة وحاول مرة ثانية.",
+};
+
+function formatRecordingDuration(totalSeconds: number) {
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = String(totalSeconds % 60).padStart(2, "0");
+  return `${minutes}:${seconds}`;
+}
 
 const VOICE_SOURCE_LABEL = {
   api: "elevenlabs",
@@ -56,9 +55,9 @@ const COPY: Record<SceneState, { eyebrow: string; title: string; helper: string 
     helper: "اضغط المايك وابدأ بطريقتك — عادي تغلط.",
   },
   listening: {
-    eyebrow: "أسمعك الآن",
+    eyebrow: "جاري التسجيل",
     title: "قل طلبك بالإنجليزي…",
-    helper: "خذ راحتك، ما راح أقاطعك.",
+    helper: "اضغط زر المايك مرة أخرى فور انتهائك.",
   },
   thinking: {
     eyebrow: "لحظة بس",
@@ -128,13 +127,17 @@ function SoundMark({ active = false }: { active?: boolean }) {
 
 export default function Home() {
   const [scene, setScene] = useState<SceneState>("ready");
-  const [mode, setMode] = useState<ExperienceMode>("showcase");
+  const [speechInput, setSpeechInput] = useState<SpeechInputState>(INITIAL_SPEECH_INPUT);
+  const [isStartingCapture, setIsStartingCapture] = useState(false);
+  const [isStoppingCapture, setIsStoppingCapture] = useState(false);
+  const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [transcript, setTranscript] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [notice, setNotice] = useState("");
   const timers = useRef<number[]>([]);
-  const recognition = useRef<SpeechRecognitionLike | null>(null);
-  const latestTranscript = useRef("");
+  const pushToTalk = useRef<PushToTalkController | null>(null);
+  const startingCapture = useRef(false);
+  const stoppingCapture = useRef(false);
   const conversation = useRef<HTMLElement | null>(null);
   const correctionCard = useRef<HTMLDivElement | null>(null);
   const coachAudio = useRef<HTMLAudioElement | null>(null);
@@ -172,11 +175,15 @@ export default function Home() {
 
   const resetScene = useCallback(() => {
     clearTimers();
-    recognition.current?.stop();
-    recognition.current = null;
+    startingCapture.current = false;
+    stoppingCapture.current = false;
+    setIsStartingCapture(false);
+    setIsStoppingCapture(false);
+    setRecordingSeconds(0);
+    pushToTalk.current?.reset();
     stopCoachPlayback();
     setTranscript("");
-    latestTranscript.current = "";
+    setSpeechInput(INITIAL_SPEECH_INPUT);
     setScene("ready");
     setNotice("");
   }, [clearTimers, stopCoachPlayback]);
@@ -184,7 +191,6 @@ export default function Home() {
   useEffect(
     () => () => {
       clearTimers();
-      recognition.current?.stop();
       stopCoachPlayback();
     },
     [clearTimers, stopCoachPlayback],
@@ -197,6 +203,15 @@ export default function Home() {
     });
     return () => window.cancelAnimationFrame(frame);
   }, [scene]);
+
+  useEffect(() => {
+    if (speechInput.status !== "listening") return;
+    const startedAt = Date.now();
+    const timer = window.setInterval(() => {
+      setRecordingSeconds(Math.floor((Date.now() - startedAt) / 1000));
+    }, 250);
+    return () => window.clearInterval(timer);
+  }, [speechInput.status]);
 
   const playCoachReply = useCallback(async () => {
     stopCoachPlayback();
@@ -299,11 +314,8 @@ export default function Home() {
 
   const completeListening = useCallback(
     (heardText: string) => {
-      recognition.current?.stop();
-      recognition.current = null;
-      const finalTranscript = heardText.trim() || DEMO_TRANSCRIPT;
-      latestTranscript.current = finalTranscript;
-      setTranscript(finalTranscript);
+      if (!heardText.trim()) return;
+      setTranscript(heardText);
       setScene("thinking");
       addTimer(() => {
         setScene("speaking");
@@ -313,62 +325,103 @@ export default function Home() {
     [addTimer, playCoachReply],
   );
 
-  const runShowcase = useCallback(() => {
-    setScene("listening");
-    setTranscript("");
-    latestTranscript.current = "";
-    addTimer(() => { latestTranscript.current = "I want…"; setTranscript("I want…"); }, 650);
-    addTimer(() => { latestTranscript.current = "I want order…"; setTranscript("I want order…"); }, 1250);
-    addTimer(() => completeListening(DEMO_TRANSCRIPT), 2150);
-  }, [addTimer, completeListening]);
+  useEffect(() => {
+    let active = true;
+    const controller = createPushToTalkController((state) => {
+      if (!active) return;
+      setSpeechInput(state);
 
-  const runLive = useCallback(() => {
-    const Recognition = window.SpeechRecognition ?? window.webkitSpeechRecognition;
-    if (!Recognition) {
-      setNotice("التعرّف المباشر غير متاح هنا، شغّلت وضع العرض بدلًا منه.");
-      runShowcase();
-      return;
-    }
-
-    const engine = new Recognition();
-    recognition.current = engine;
-    engine.continuous = false;
-    engine.interimResults = true;
-    engine.lang = "en-US";
-    engine.onresult = (event) => {
-      let heard = "";
-      for (let index = 0; index < event.results.length; index += 1) {
-        heard += event.results[index][0]?.transcript ?? "";
+      if (state.status === "listening") {
+        stoppingCapture.current = false;
+        setIsStoppingCapture(false);
+        setRecordingSeconds(0);
+        setTranscript("");
+        setNotice("");
+        setScene("listening");
+        return;
       }
-      latestTranscript.current = heard;
-      setTranscript(heard);
-      const lastResult = event.results[event.results.length - 1];
-      if (lastResult?.isFinal) completeListening(heard);
-    };
-    engine.onerror = () => {
-      setNotice("تعذّر الوصول للمايك، استخدمت المشهد الجاهز.");
-      runShowcase();
-    };
-    engine.onend = () => {
-      if (latestTranscript.current.trim()) completeListening(latestTranscript.current);
-    };
-    setScene("listening");
-    setTranscript("");
-    latestTranscript.current = "";
-    engine.start();
-  }, [completeListening, runShowcase]);
+      if (state.status === "processing") {
+        stoppingCapture.current = false;
+        setIsStoppingCapture(false);
+        setNotice("");
+        return;
+      }
+      if (state.status === "completed") {
+        stoppingCapture.current = false;
+        setIsStoppingCapture(false);
+        completeListening(state.transcript);
+        return;
+      }
+      if (state.status === "error") {
+        stoppingCapture.current = false;
+        setIsStoppingCapture(false);
+        clearTimers();
+        setTranscript("");
+        setScene("ready");
+        setNotice(
+          state.errorCode
+            ? SPEECH_ERROR_MESSAGES[state.errorCode]
+            : "حدث خطأ غير متوقع. حاول مرة ثانية.",
+        );
+      }
+    });
 
-  const begin = () => {
-    if (scene === "listening") {
-      completeListening(transcript || DEMO_TRANSCRIPT);
+    pushToTalk.current = controller;
+    return () => {
+      active = false;
+      controller.dispose();
+      if (pushToTalk.current === controller) pushToTalk.current = null;
+    };
+  }, [clearTimers, completeListening]);
+
+  const begin = async () => {
+    const controller = pushToTalk.current;
+    if (!controller) return;
+    const status = controller.getState().status;
+
+    if (status === "listening") {
+      if (stoppingCapture.current) return;
+      stoppingCapture.current = true;
+      setIsStoppingCapture(true);
+      controller.stop();
       return;
     }
-    if (scene === "thinking" || scene === "speaking") return;
+    if (
+      status === "processing" ||
+      startingCapture.current ||
+      scene === "thinking" ||
+      scene === "speaking"
+    ) return;
+
     resetScene();
-    addTimer(() => (mode === "live" ? runLive() : runShowcase()), 80);
+    startingCapture.current = true;
+    setIsStartingCapture(true);
+    try {
+      await controller.start();
+    } finally {
+      if (pushToTalk.current !== controller) {
+        controller.dispose();
+        return;
+      }
+      startingCapture.current = false;
+      setIsStartingCapture(false);
+    }
   };
 
-  const activeCopy = COPY[scene];
+  const activeCopy =
+    speechInput.status === "processing"
+      ? {
+          eyebrow: "يعالج الصوت",
+          title: "لحظة…",
+          helper: "نحوّل تسجيلك إلى نص الآن.",
+        }
+      : speechInput.status === "error" && scene === "ready"
+        ? {
+            eyebrow: "حدث خطأ",
+            title: "ما اكتمل التسجيل",
+            helper: "راجع التنبيه وحاول مرة ثانية.",
+          }
+        : COPY[scene];
   const isBusy = scene === "listening" || scene === "thinking" || scene === "speaking";
 
   return (
@@ -415,7 +468,7 @@ export default function Home() {
           {(transcript || scene === "thinking" || scene === "speaking" || scene === "review") && (
             <div className="transcript-card" dir="ltr">
               <span className="card-kicker">YOU SAID</span>
-              <p>{transcript || DEMO_TRANSCRIPT}</p>
+              <p>{transcript}</p>
             </div>
           )}
 
@@ -439,17 +492,47 @@ export default function Home() {
             <button
               className={`mic-button ${isBusy ? "is-active" : ""}`}
               type="button"
-              aria-label={scene === "listening" ? "إنهاء الاستماع" : "بدء المحادثة"}
-              onClick={begin}
-              disabled={scene === "thinking" || scene === "speaking"}
+              aria-label={
+                isStoppingCapture
+                  ? "تم إيقاف التسجيل، جارٍ تجهيز الصوت"
+                  : speechInput.status === "listening"
+                  ? "إنهاء الاستماع وإرسال التسجيل"
+                  : speechInput.status === "processing"
+                    ? "جارٍ معالجة الصوت"
+                    : "بدء التسجيل"
+              }
+              onClick={() => { void begin(); }}
+              disabled={
+                isStartingCapture ||
+                isStoppingCapture ||
+                speechInput.status === "processing" ||
+                scene === "thinking" ||
+                scene === "speaking"
+              }
             >
               <span className="mic-shape" aria-hidden="true" />
             </button>
             <button className="mini-control" type="button" aria-label="تشغيل الجملة الصحيحة" onClick={() => { stopCoachPlayback(); void speakSegment(CORRECTED_SENTENCE, "en"); }} disabled={isBusy}>◖</button>
           </div>
-          <strong dir="rtl">{scene === "listening" ? "اضغط عند الانتهاء" : scene === "review" ? "جرّب مرة ثانية" : "اضغط وتكلّم"}</strong>
-          <span dir="rtl" className={`mode-label ${mode === "live" ? "is-live" : ""}`}>
-            <i /> {mode === "live" ? "مايك مباشر" : "عرض جاهز للتصوير"}
+          <strong dir="rtl">
+            {isStoppingCapture
+              ? "تم إيقاف التسجيل — جارٍ تجهيز الصوت"
+              : speechInput.status === "listening"
+              ? "جاري التسجيل — اضغط مرة أخرى للإيقاف"
+              : speechInput.status === "processing"
+                ? "جارٍ إرسال التسجيل وتحويله"
+                : scene === "review"
+                  ? "جرّب مرة ثانية"
+                  : "اضغط وتكلّم"}
+          </strong>
+          <span dir="rtl" className="mode-label is-live">
+            <i /> {isStartingCapture
+              ? "يفتح الميكروفون"
+              : isStoppingCapture
+                ? "تم الإيقاف"
+                : speechInput.status === "listening"
+                  ? `جاري التسجيل · ${formatRecordingDuration(recordingSeconds)}`
+                  : SPEECH_STATUS_LABELS[speechInput.status]}
           </span>
         </footer>
 
@@ -466,19 +549,14 @@ export default function Home() {
               <div className="sheet-heading">
                 <div>
                   <span>إعداد سريع</span>
-                  <h2 id="settings-title">اختر طريقة العرض</h2>
+                  <h2 id="settings-title">طريقة الإدخال</h2>
                 </div>
                 <button type="button" aria-label="إغلاق" onClick={() => setSettingsOpen(false)}>×</button>
               </div>
 
-              <button className={`mode-option ${mode === "showcase" ? "selected" : ""}`} type="button" onClick={() => { setMode("showcase"); resetScene(); setSettingsOpen(false); }}>
-                <span className="option-icon">✦</span>
-                <span><strong>عرض مضمون</strong><small>مشهد ثابت لا يفشل أثناء التصوير</small></span>
-                <i />
-              </button>
-              <button className={`mode-option ${mode === "live" ? "selected" : ""}`} type="button" onClick={() => { setMode("live"); resetScene(); setSettingsOpen(false); }}>
+              <button className="mode-option selected" type="button" onClick={() => setSettingsOpen(false)}>
                 <span className="option-icon live-dot">●</span>
-                <span><strong>مايك مباشر</strong><small>يستخدم التعرف المتاح في المتصفح</small></span>
+                <span><strong>مايك مباشر</strong><small>يسجل صوتك ويرسله للتحويل إلى نص بعد الإيقاف</small></span>
                 <i />
               </button>
 

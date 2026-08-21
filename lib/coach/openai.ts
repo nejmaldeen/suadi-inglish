@@ -16,6 +16,9 @@ const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
 const DEFAULT_OPENAI_MODEL = "gpt-5.6-luna";
 
 export type CoachEnvironment = {
+  COACH_PROVIDER?: string;
+  GEMINI_API_KEY?: string;
+  GEMINI_MODEL?: string;
   OPENAI_API_KEY?: string;
   OPENAI_MODEL?: string;
 };
@@ -84,7 +87,26 @@ function assertResultInvariants(request: CoachRequest, result: CoachResult) {
   }
 }
 
-export async function generateCoachResult(
+export function parseAndValidateCoachResult(request: CoachRequest, outputText: string) {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(outputText);
+  } catch {
+    throw new CoachProviderError();
+  }
+
+  let result: CoachResult;
+  try {
+    result = parseCoachResult(parsed);
+  } catch (error) {
+    if (error instanceof CoachValidationError) throw new CoachProviderError();
+    throw error;
+  }
+  assertResultInvariants(request, result);
+  return result;
+}
+
+export async function generateCoachResultWithOpenAI(
   request: CoachRequest,
   environment: CoachEnvironment,
   fetcher: CoachFetcher = fetch,
@@ -125,22 +147,7 @@ export async function generateCoachResult(
     const outputText = getResponseOutputText(await response.json());
     if (!outputText) throw new CoachProviderError();
 
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(outputText);
-    } catch {
-      throw new CoachProviderError();
-    }
-
-    let result: CoachResult;
-    try {
-      result = parseCoachResult(parsed);
-    } catch (error) {
-      if (error instanceof CoachValidationError) throw new CoachProviderError();
-      throw error;
-    }
-    assertResultInvariants(request, result);
-    return result;
+    return parseAndValidateCoachResult(request, outputText);
   } catch (error) {
     if (error instanceof CoachConfigurationError || error instanceof CoachProviderError) throw error;
     throw new CoachProviderError();
@@ -148,3 +155,5 @@ export async function generateCoachResult(
     clearTimeout(timeout);
   }
 }
+
+export const generateCoachResult = generateCoachResultWithOpenAI;

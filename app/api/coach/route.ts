@@ -6,10 +6,10 @@ import {
 import {
   CoachConfigurationError,
   CoachProviderError,
-  generateCoachResult,
   type CoachEnvironment,
   type CoachFetcher,
 } from "../../../lib/coach/openai.ts";
+import { generateCoachResult } from "../../../lib/coach/provider.ts";
 import { getCoachScenario } from "../../../lib/coach/scenarios/coffee-v1.ts";
 
 async function readCoachEnvironment(): Promise<CoachEnvironment> {
